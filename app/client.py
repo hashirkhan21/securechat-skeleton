@@ -335,16 +335,13 @@ def start_messaging(sock, aes_key, username):
                 continue
             
             # Create and send message
-            # Create and send message
+            print("\n" + "="*60)
+            print(f"→ Sending Message #{send_seqno}")
+            print("="*60)
+            
             plaintext = user_input.encode('utf-8')
             msg_json = make_msg(send_seqno, plaintext, aes_key, client_priv_key)
-
-            # TAMPER TEST: Corrupt the signature to test SIG FAIL
-            msg_dict = json.loads(msg_json)
-            msg_dict['sig'] = msg_dict['sig'][:-10] + "CORRUPTED="  # Corrupt signature
-            msg_json = json.dumps(msg_dict)
-            print("⚠️  TAMPER TEST: Signature corrupted!")
-
+            
             # Send message
             sock.sendall(msg_json.encode('utf-8') + b'\n')
             

@@ -2,6 +2,9 @@
 certs/*.key
 certs/*.crt
 
+# Transcript files - contain session data
+transcripts/
+
 # Python
 __pycache__/
 *.py[cod]

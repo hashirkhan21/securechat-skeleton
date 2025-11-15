@@ -17,6 +17,12 @@ from app.crypto.pki import load_own_cert, verify_cert, verify_expiry, get_cn
 from app.crypto.dh import dh_generate_private, dh_generate_public, dh_compute_shared
 from app.crypto.aes import aes_encrypt, aes_decrypt
 from app.storage.db import register_user, login_user
+from app.crypto.sign import load_private_key
+from app.common.message_utils import (
+    make_msg, verify_and_decrypt, append_transcript_line,
+    compute_transcript_hash, make_session_receipt,
+    log_message_sent, log_message_received, log_verification_failure
+)
 
 
 def send_message(sock, message_dict):
@@ -337,11 +343,8 @@ def handle_client(client_sock, client_addr):
             print(f"[{client_addr}] Unknown message type: {msg_type}")
             return
         
-        print(f"[{client_addr}] " + "="*50)
-        print(f"[{client_addr}] Ready for secure messaging (not yet implemented)")
-        print(f"[{client_addr}] " + "="*50 + "\n")
-        
-        # TODO: Step 4 - Handle encrypted messaging
+        # STEP 4: Secure Messaging
+        handle_messaging(client_sock, client_addr, aes_key)
         
     except Exception as e:
         print(f"[{client_addr}] Error: {e}")
@@ -350,6 +353,119 @@ def handle_client(client_sock, client_addr):
     finally:
         client_sock.close()
         print(f"[{client_addr}] Connection closed\n")
+
+
+def handle_messaging(client_sock, client_addr, aes_key):
+    """
+    Handle secure messaging session.
+    Implements Step 4: Receive signed encrypted messages, verify, and echo back.
+    """
+    print(f"[{client_addr}] " + "="*50)
+    print(f"[{client_addr}] STEP 4: Secure Messaging")
+    print(f"[{client_addr}] " + "="*50)
+    
+    # Load server private key and client certificate
+    try:
+        server_priv_key = load_private_key("certs/server.key")
+        client_cert_pem = load_own_cert("client")  # We received this during handshake
+        # Actually, we need to store it from the handshake - for now load from file
+        client_cert = verify_cert(client_cert_pem)
+    except Exception as e:
+        print(f"[{client_addr}] ✗ Failed to load keys/certificates: {e}")
+        return
+    
+    # Initialize sequence numbers
+    recv_seqno = 1
+    send_seqno = 1
+    
+    # Transcript file
+    transcript_path = f"transcripts/server_session_{client_addr[0]}_{client_addr[1]}.txt"
+    
+    print(f"[{client_addr}] Waiting for messages...\n")
+    
+    try:
+        while True:
+            # Receive message
+            msg_data = receive_message(client_sock)
+            
+            if msg_data.get('type') == 'msg':
+                print(f"[{client_addr}] " + "="*50)
+                print(f"[{client_addr}] ← Incoming Message #{msg_data.get('seqno')}")
+                print(f"[{client_addr}] " + "="*50)
+                
+                # Verify and decrypt
+                ok, result, new_seqno = verify_and_decrypt(
+                    msg_data, aes_key, client_cert, recv_seqno
+                )
+                
+                if ok:
+                    plaintext = result.decode('utf-8')
+                    print(f"[{client_addr}]   Content: {plaintext}")
+                    print(f"[{client_addr}]   ✓ Signature verified")
+                    print(f"[{client_addr}]   ✓ Sequence number valid: {msg_data['seqno']}")
+                    recv_seqno = new_seqno
+                    
+                    # Append to transcript
+                    append_transcript_line(
+                        transcript_path,
+                        msg_data['seqno'],
+                        msg_data['ts'],
+                        msg_data['ct'],
+                        msg_data['sig'],
+                        client_cert
+                    )
+                    
+                    # Echo the message back
+                    print(f"[{client_addr}] → Echoing message back (#{send_seqno})")
+                    echo_msg = f"Server echo: {plaintext}"
+                    msg_json = make_msg(send_seqno, echo_msg.encode('utf-8'), aes_key, server_priv_key)
+                    
+                    # Send echo
+                    client_sock.sendall(msg_json.encode('utf-8') + b'\n')
+                    
+                    # Parse for transcript
+                    msg_dict = json.loads(msg_json)
+                    
+                    # Append to transcript
+                    append_transcript_line(
+                        transcript_path,
+                        msg_dict['seqno'],
+                        msg_dict['ts'],
+                        msg_dict['ct'],
+                        msg_dict['sig'],
+                        client_cert
+                    )
+                    
+                    send_seqno += 1
+                    print(f"[{client_addr}]   ✓ Echo sent\n")
+                    
+                else:
+                    print(f"[{client_addr}]   ✗ Verification failed: {result}")
+                    if result == "REPLAY":
+                        print(f"[{client_addr}]   ✗ REPLAY attack detected!")
+                    elif result == "SIG FAIL":
+                        print(f"[{client_addr}]   ✗ SIG FAIL: Signature verification failed!")
+                    print()
+                    
+            else:
+                # Unknown message type, might be end of session
+                break
+                
+    except Exception as e:
+        print(f"[{client_addr}] Messaging session ended: {e}")
+    finally:
+        # Generate session receipt
+        try:
+            print(f"[{client_addr}] " + "="*50)
+            print(f"[{client_addr}] Generating Session Receipt")
+            print(f"[{client_addr}] " + "="*50)
+            
+            receipt = make_session_receipt(transcript_path, server_priv_key, "client")
+            print(f"[{client_addr}] ✓ Transcript hash: {receipt['transcript_hash'][:32]}...")
+            print(f"[{client_addr}] ✓ Receipt signature generated")
+            print(f"[{client_addr}] ✓ Transcript saved to: {transcript_path}\n")
+        except Exception as e:
+            print(f"[{client_addr}] ✗ Failed to generate receipt: {e}\n")
 
 
 def main():

@@ -18,30 +18,45 @@ class ServerHelloMessage(BaseModel):
     nonce: str
 
 
-class RegisterMessage(BaseModel):
-    """User registration message."""
-    type: str = "register"
-    username: str
-    password: str
-
-
-class LoginMessage(BaseModel):
-    """User login message."""
-    type: str = "login"
-    username: str
-    password: str
-
-
 class DHClientMessage(BaseModel):
-    """Diffie-Hellman client public key."""
+    """Diffie-Hellman client message with parameters and public key."""
     type: str = "dh_client"
-    public_key: str
+    p: int
+    g: int
+    A: int
 
 
 class DHServerMessage(BaseModel):
-    """Diffie-Hellman server public key."""
+    """Diffie-Hellman server response with public key."""
     type: str = "dh_server"
-    public_key: str
+    B: int
+
+
+class RegisterMessage(BaseModel):
+    """User registration message (encrypted)."""
+    type: str = "register"
+    encrypted_data: str  # base64 encoded encrypted payload
+
+
+class LoginMessage(BaseModel):
+    """User login message (encrypted)."""
+    type: str = "login"
+    encrypted_data: str  # base64 encoded encrypted payload
+
+
+class RegisterResponse(BaseModel):
+    """Registration response."""
+    type: str = "register_response"
+    success: bool
+    message: str
+
+
+class LoginResponse(BaseModel):
+    """Login response."""
+    type: str = "login_response"
+    success: bool
+    message: str
+    username: Optional[str] = None
 
 
 class ChatMessage(BaseModel):

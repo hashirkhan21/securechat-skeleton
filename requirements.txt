@@ -3,3 +3,5 @@ PyMySQL
 python-dotenv
 pydantic
 rich
+pycryptodome
+mysql-connector-python

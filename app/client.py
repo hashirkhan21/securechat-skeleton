@@ -15,6 +15,14 @@ from app.common.utils import b64e, b64d
 from app.crypto.pki import load_own_cert, verify_cert, verify_expiry, get_cn
 from app.crypto.dh import dh_generate_private, dh_generate_public, dh_compute_shared, get_dh_parameters
 from app.crypto.aes import aes_encrypt, aes_decrypt
+from app.crypto.sign import load_private_key
+from app.common.message_utils import (
+    make_msg, verify_and_decrypt, append_transcript_line,
+    compute_transcript_hash, make_session_receipt,
+    log_message_sent, log_message_received, log_verification_failure,
+    load_cert_from_pem
+)
+import threading
 
 
 def send_message(sock, message_dict):
@@ -227,6 +235,154 @@ def login_user(sock, aes_key):
         return False, None
 
 
+def start_messaging(sock, aes_key, username):
+    """
+    Start secure messaging session.
+    Implements Step 4: Signed encrypted messages with transcript.
+    """
+    print("="*60)
+    print("STEP 4: Secure Messaging")
+    print("="*60)
+    print("Type messages to send. Type '/quit' to exit.\n")
+    
+    # Load client private key and server certificate
+    try:
+        client_priv_key = load_private_key("certs/client.key")
+        server_cert_pem = load_own_cert("server")  # We received this during handshake
+        # Actually, we need to store it from the handshake - for now load from file
+        server_cert = verify_cert(server_cert_pem)
+    except Exception as e:
+        print(f"✗ Failed to load keys/certificates: {e}")
+        return
+    
+    # Initialize sequence numbers
+    send_seqno = 1
+    recv_seqno = 1
+    
+    # Transcript file
+    transcript_path = f"transcripts/client_session_{username}.txt"
+    
+    # Flag to control receive thread
+    running = True
+    
+    def receive_messages():
+        """Background thread to receive messages."""
+        nonlocal recv_seqno, running
+        
+        while running:
+            try:
+                # Set timeout so we can check running flag
+                sock.settimeout(0.5)
+                msg_data = receive_message(sock)
+                
+                if msg_data.get('type') == 'msg':
+                    print("\n" + "="*60)
+                    print(f"← Incoming Message")
+                    print("="*60)
+                    
+                    # Verify and decrypt
+                    ok, result, new_seqno = verify_and_decrypt(
+                        msg_data, aes_key, server_cert, recv_seqno
+                    )
+                    
+                    if ok:
+                        plaintext = result.decode('utf-8')
+                        log_message_received(msg_data['seqno'], plaintext)
+                        recv_seqno = new_seqno
+                        
+                        # Append to transcript
+                        append_transcript_line(
+                            transcript_path,
+                            msg_data['seqno'],
+                            msg_data['ts'],
+                            msg_data['ct'],
+                            msg_data['sig'],
+                            server_cert
+                        )
+                        print(f"\n{plaintext}\n")
+                        print("Type your message (or /quit to exit):")
+                    else:
+                        log_verification_failure(result)
+                        if result == "REPLAY":
+                            print("  ✗ REPLAY attack detected!")
+                        elif result == "SIG FAIL":
+                            print("  ✗ SIG FAIL: Signature verification failed!")
+                        else:
+                            print(f"  ✗ {result}")
+                        
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if running:
+                    print(f"\n✗ Error receiving message: {e}")
+                break
+    
+    # Start receive thread
+    recv_thread = threading.Thread(target=receive_messages, daemon=True)
+    recv_thread.start()
+    
+    try:
+        while True:
+            # Get user input
+            user_input = input()
+            
+            if user_input.strip() == '/quit':
+                print("\nEnding session...")
+                running = False
+                break
+            
+            if not user_input.strip():
+                continue
+            
+            # Create and send message
+            print("\n" + "="*60)
+            print(f"→ Sending Message #{send_seqno}")
+            print("="*60)
+            
+            plaintext = user_input.encode('utf-8')
+            msg_json = make_msg(send_seqno, plaintext, aes_key, client_priv_key)
+            
+            # Send message
+            sock.sendall(msg_json.encode('utf-8') + b'\n')
+            
+            # Parse to get details for transcript
+            msg_dict = json.loads(msg_json)
+            
+            log_message_sent(send_seqno, user_input)
+            
+            # Append to transcript
+            append_transcript_line(
+                transcript_path,
+                msg_dict['seqno'],
+                msg_dict['ts'],
+                msg_dict['ct'],
+                msg_dict['sig'],
+                server_cert
+            )
+            
+            send_seqno += 1
+            print()
+            
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+        running = False
+    finally:
+        running = False
+        
+        # Generate session receipt
+        try:
+            print("\n" + "="*60)
+            print("Generating Session Receipt")
+            print("="*60)
+            
+            receipt = make_session_receipt(transcript_path, client_priv_key, "server")
+            print(f"✓ Transcript hash: {receipt['transcript_hash'][:32]}...")
+            print(f"✓ Receipt signature generated")
+            print(f"✓ Transcript saved to: {transcript_path}\n")
+        except Exception as e:
+            print(f"✗ Failed to generate receipt: {e}\n")
+
+
 def main():
     """Main client workflow."""
     HOST = '127.0.0.1'
@@ -275,14 +431,13 @@ def main():
             sock.close()
             return
         
-        print("="*60)
-        print("Ready for secure messaging (not yet implemented)")
-        print("="*60 + "\n")
-        
-        # TODO: Step 4 - Encrypted messaging
+        # STEP 4: Secure Messaging
+        start_messaging(sock, aes_key, username if action == 'l' else "user")
         
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if 'sock' in locals():
             sock.close()
